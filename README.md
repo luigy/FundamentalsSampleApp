@@ -7,7 +7,7 @@ Apply for renting a property for a specific term and get rejected or approved by
 3. Revise choice can be exercised on the newly generated contract from above.
 4. Accept choice is exercised to finalize the rental application and generate a new RentalAgreement contract.
 
-[![Demo](./Demo.png)](https://share.vidyard.com/watch/xbDuZMbNUbgfHmPnqzt72N?)
+* There is also a Property contract uniquely identified by an owner and name. The LookupAgreement may be excercised by the superintendent as a shorthand to locate(if any) an active RentalAgreement given a specific term. Also superintendent can ExcerciseAgreement to archive any contracts whose term has already elapsed.
 
 ### II. Building
 To compile the project
