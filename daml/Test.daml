@@ -1,29 +1,155 @@
 module Test where
+
 import Main
 import Daml.Script
+import DA.Either (isRight)
+import DA.Date (Month(Jan), date)
+import DA.Optional (isSome)
 
-setup : Script ProjectId
+setup : Script ()
 setup = do 
+    rd <- initRentalData
+    testValidRoundtrip rd
+    testRejectRoundtrip rd
+    testOccupiedProperty rd
+    testUpdateRentalAgreement rd
+    testSuperintendentLookupAgreement rd
+
+data RentalData = RentalData with
+    alice : Party
+    bob : Party
+    charlie : Party
+    dan : Party
+    property : PropertyKey
+    propertyId : PropertyId
+
+-- Setup for parties and properties used during tests.
+initRentalData : Script RentalData
+initRentalData = script do
+    -- owner & superitendent
     alice <- allocatePartyWithHint "Alice" (PartyIdHint "Alice")
+
     bob <- allocatePartyWithHint "Bob" (PartyIdHint "Bob")
     charlie <- allocatePartyWithHint "Charlie" (PartyIdHint "Charlie")
 
-    bobProjectIdea <- submit bob do
-        createCmd ProjectIdea with
-            employee = bob
-            colleague = charlie
-            manager = alice
-            project = "Daml Fundamentals Certification Capstone Rubric - Draft No. 1"
-            note = "Should include both backend AND frontend"
+    dan <- allocatePartyWithHint "Dan" (PartyIdHint "Dan")
 
-    aliceRejects <- submit alice do 
-        exerciseCmd bobProjectIdea Reject with
-            feedback = "No way, teaching frontend at this point is too much"
-    
-    bobRevises <- submit bob do
-        exerciseCmd aliceRejects Revise with
-            newProject = "Daml Fundamentals Certification Capstone Rubric - Draft No.2"
-            newNote = "Agreed, let's focus on the Daml backend and Navigator"
+    let propertyName = "golden-chopsticks"
+    propertyId <- submit alice $
+        createCmd Property with
+            owner = alice
+            superintendent = alice
+            name = propertyName
 
-    submit alice do
-        exerciseCmd bobRevises Accept
+    let property = (alice, propertyName)
+    pure $ RentalData with ..
+
+-- Test for the happy path.
+testValidRoundtrip : RentalData -> Script ()
+testValidRoundtrip rd = script do
+    bobApplication <- submit rd.bob do
+        createCmd RentalApplication with
+            superintendent = rd.alice
+            property = rd.property
+            renter = rd.bob
+            term = date 2000 Jan 01
+            amount = 10.0
+
+    aliceAccepts <- submit rd.alice do
+        exerciseCmd bobApplication Accept
+
+    assertMsg "Expected to succeed" $ isRight aliceAccepts
+
+    pure ()
+
+-- Test for a RentalApplication getting rejected and later accepted after renter
+-- revision.
+testRejectRoundtrip : RentalData -> Script ()
+testRejectRoundtrip rd = script do
+    let ra = RentalApplication with
+            superintendent = rd.alice
+            property = rd.property
+            renter = rd.bob
+            term = date 2000 Jan 02
+            amount = 10.0
+
+    bobApplication <- submit rd.bob do
+        createCmd ra
+    aliceRejects <- submit rd.alice do
+        exerciseCmd bobApplication Reject
+    bobResubmit <- submit rd.bob do
+        createCmd $ ra { amount = ra.amount + 10.0 }
+    aliceAccepts <- submit rd.alice do
+        exerciseCmd bobResubmit Accept
+
+    pure ()
+
+-- Test for ensuring a property may not be rented more than once.
+testOccupiedProperty : RentalData -> Script ()
+testOccupiedProperty rd = script do
+    let application = RentalApplication with
+            superintendent = rd.alice
+            property = rd.property
+            renter = rd.bob
+            amount = 10.0
+            term = date 2000 Jan 03
+
+    bobApplication <- submit rd.bob do
+        createCmd application
+    aliceAccepts <- submit rd.alice do
+        exerciseCmd bobApplication Accept
+
+    charlieApplication <- submit rd.charlie do
+        createCmd application { renter = rd.charlie }
+
+    submitMustFail rd.alice do
+        exerciseCmd charlieApplication Accept
+
+-- Test Rental Agreement archival once Term has elapsed.
+testUpdateRentalAgreement : RentalData -> Script ()
+testUpdateRentalAgreement rd = script do
+    let term = date 2000 Jan 05
+    bobApplication <- submit rd.bob do
+        createCmd RentalApplication with
+            superintendent = rd.alice
+            property = rd.property
+            renter = rd.bob
+            amount = 10.0
+            term
+    aliceAccepts <- submit rd.alice do
+        exerciseCmd bobApplication Accept
+
+    rentalAgreementLookup <- submit rd.alice do
+        exerciseCmd rd.propertyId LookupAgreement with term
+
+    assertMsg "There should exist a rental agreement"
+        (isSome rentalAgreementLookup)
+
+    aliceUpdatesAgreement <- submit rd.alice do
+        exerciseCmd rd.propertyId ExcerciseAgreement
+
+    rentalAgreementLookupAfterUpdate <- submit rd.alice do
+        exerciseCmd rd.propertyId LookupAgreement with term
+    assertMsg  "There should not exist a rental agreement"
+        (isSome rentalAgreementLookupAfterUpdate)
+
+-- Test superintendent being able to lookup up RentalAgreements from a Property
+-- contract given a specific term.
+testSuperintendentLookupAgreement : RentalData -> Script ()
+testSuperintendentLookupAgreement rd = script do
+    let application = RentalApplication with
+            superintendent = rd.alice
+            property = rd.property
+            renter = rd.bob
+            amount = 10.0
+            term = date 2000 Jan 06
+    bobApplication <- submit rd.bob do
+        createCmd application
+    aliceAccepts <- submit rd.alice do
+        exerciseCmd bobApplication Accept
+    bobRentalAgreement <- submit rd.alice $ do
+        exerciseCmd rd.propertyId LookupAgreement with term = application.term
+
+    assertMsg "Expected superintendent to have an active Rental Agreement"
+        (isSome bobRentalAgreement)
+    pure ()

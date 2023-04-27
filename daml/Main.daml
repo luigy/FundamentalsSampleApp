@@ -1,60 +1,118 @@
 module Main where
 
-type ProjectIdeaId = ContractId ProjectIdea
-type ProjectId = ContractId Project
+import Prelude hiding (mapA)
+import DA.Action (when)
+import DA.Date (toDateUTC)
+import DA.Foldable (forA_)
+import DA.Traversable (mapA)
 
-template ProjectIdea
+
+type RentalApplicationId = ContractId RentalApplication
+type RentalAgreementId = ContractId RentalAgreement
+type PropertyId = ContractId Property
+type PropertyKey = (Party, Text)
+type AgreementKey = (Party, Text, Term)
+
+-- An application to rent a property.
+template RentalApplication
     with
-        employee : Party
-        colleague : Party
-        manager : Party
-        project : Text
-        note : Text
-    where 
-        signatory employee
-        observer colleague, manager
+        superintendent : Party
+        renter : Party
+        property : PropertyKey
 
-        -- employee can propose a project idea 
-        choice Propose : ProjectIdeaId -- "ProjectIdeaId" replaces "ContractId ProjectIdea"
-            controller employee
+        term : Term
+        amount : Decimal
+    where
+        signatory renter
+        observer superintendent
+
+        -- superintendent can Reject an offer being too low or it may want to
+        -- save that date.
+        choice Reject : RentalApplicationId
+            with
+            controller superintendent
             do
                 create this
 
-        -- upon getting rejected, employee can revise the project idea
-        choice Revise : ProjectIdeaId
+        -- superintendent can Accept an application and this may fail if that
+        -- date already has a RentalAgreement.
+        choice Accept : Either Text RentalAgreementId
             with
-                newProject : Text
-                newNote : Text 
-            controller employee
+            controller superintendent
+            do
+                mraId <- lookupByKey @RentalAgreement (property._1,property._2,term)
+                mra <- mapA fetch mraId
+                -- validate no conflicting agreement exists.
+                case mra of
+                    Some ra | term `termInRange` ra.term -> do
+                        pure $ Left "There is an active rental agreement for that term."
+                    _ -> do
+                        raId <- create RentalAgreement with
+                            tenantInContract = renter
+                            superintendentInContract = superintendent
+                            ..
+                        pure $ Right raId
+
+        -- renter has the chance to Revise the amount they specified and have a
+        -- better chance in getting approved.
+        choice Revise : RentalApplicationId
+            with
+                newAmount : Decimal
+            controller renter
             do
                 create this with
-                    project = newProject
-                    note = newNote
+                    amount = newAmount
 
-        -- manager can reject the project idea
-        choice Reject : ProjectIdeaId 
-            with
-                feedback : Text
-            controller manager
-            do
-                create this with 
-                    note = feedback 
-        
-        -- manager can accept the project idea, which will archive the project that the choice is being exercised and create a new contract
-        choice Accept : ProjectId
-            controller manager
-            do
-                create Project with
-                    employeeInContract = employee
-                    managerInContract = manager
-                    projectTitle = project 
-                    description = note 
 
-template Project
+type Term = Date
+termInRange : Term -> Term -> Bool
+termInRange = (/=)
+
+
+-- The actual agreement that binds the tenant, property and superintendent for a term and amount.
+template RentalAgreement
     with 
-        employeeInContract : Party
-        managerInContract : Party
-        projectTitle : Text 
-        description : Text 
+        tenantInContract : Party
+        superintendentInContract : Party
+        property : PropertyKey
+        term : Term
+        amount : Decimal
     where
-        signatory employeeInContract, managerInContract
+        signatory superintendentInContract
+        observer tenantInContract, superintendentInContract
+
+        key (property._1, property._2, term) : AgreementKey
+        maintainer key._1
+
+-- The property uniquely identified by a name and onwer.
+template Property
+    with
+        owner : Party
+        superintendent : Party
+        name : Text
+    where
+        signatory owner
+        observer superintendent
+
+        ensure name /= ""
+
+        key (owner, name) : PropertyKey
+        maintainer key._1
+
+        -- Archive linked agreements whose term has elapsed.
+        nonconsuming choice ExcerciseAgreement : ()
+            with
+            controller superintendent
+            do
+                d <- toDateUTC <$> getTime
+                mraId <- lookupByKey @RentalAgreement (owner, name, d)
+                forA_ mraId $ \raid -> do
+                    ra <- fetch raid
+                    when (d > ra.term) $ archive raid
+
+        -- A shorthand to retrieve an
+        nonconsuming choice LookupAgreement : Optional RentalAgreement
+            with term : Term
+            controller superintendent
+            do
+                mapA fetch =<< lookupByKey @RentalAgreement (owner, name, term)
